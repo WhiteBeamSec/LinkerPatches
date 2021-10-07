@@ -1,29 +1,1126 @@
-2013-05-25  Alexander Monakov  <amonakov@ispras.ru>
-
-	* elf/dl-reloc.c (_dl_relocate_object): Enable profiling only if one
-	of audit libraries provides PLT hooks.
-
-diff --git a/elf/dl-reloc.c b/elf/dl-reloc.c
-index 73d98f8..675e15b 100644
---- a/elf/dl-reloc.c
-+++ b/elf/dl-reloc.c
-@@ -167,7 +167,16 @@ _dl_relocate_object (struct link_map *l, struct r_scope_elem *scope[],
- #ifdef SHARED
-   /* If we are auditing, install the same handlers we need for profiling.  */
-   if ((reloc_mode & __RTLD_AUDIT) == 0)
--    consider_profiling |= GLRO(dl_audit) != NULL;
+diff -u b/elf/rtld.c b/elf/rtld.c
+--- b/elf/rtld.c
++++ b/elf/rtld.c
+@@ -988,10 +988,10 @@
+       return;
+     }
+ 
+-  if (lav > LAV_CURRENT)
++  if (lav != LAV_CURRENT)
+     {
+       _dl_debug_printf ("\
+-ERROR: audit interface '%s' requires version %d (maximum supported version %d); ignored.\n",
++ERROR: audit interface '%s' requires version %d (current supported version %d); ignored.\n",
+ 			name, lav, LAV_CURRENT);
+       unload_audit_module (dlmargs.map, original_tls_idx);
+       return;
+@@ -1053,6 +1053,8 @@
+ 
+   /* Mark the DSO as being used for auditing.  */
+   dlmargs.map->l_auditing = 1;
++  /* Mark the DSO to not clear the TLS bss in tls initialization.  */
++  dlmargs.map->l_dont_set_tls_static = 1;
+ }
+ 
+ /* Notify the the audit modules that the object MAP has already been
+unchanged:
+--- a/sysdeps/aarch64/Makefile
++++ b/sysdeps/aarch64/Makefile
+@@ -10,6 +10,26 @@ endif
+ 
+ ifeq ($(subdir),elf)
+ sysdep-dl-routines += dl-bti
++
++tests += tst-audit26 \
++	 tst-audit27
++
++modules-names += \
++    tst-audit26mod \
++    tst-auditmod26 \
++    tst-audit27mod \
++    tst-auditmod27
++
++$(objpfx)tst-audit26: $(objpfx)tst-audit26mod.so \
++		      $(objpfx)tst-auditmod26.so
++LDFLAGS-tst-audit26 += -Wl,-z,lazy
++tst-audit26-ENV = LD_AUDIT=$(objpfx)tst-auditmod26.so
++
++$(objpfx)tst-audit27: $(objpfx)tst-audit27mod.so \
++		      $(objpfx)tst-auditmod27.so
++$(objpfx)tst-audit27mod.so: $(libsupport)
++LDFLAGS-tst-audit27 += -Wl,-z,lazy
++tst-audit27-ENV = LD_AUDIT=$(objpfx)tst-auditmod27.so
+ endif
+ 
+ ifeq ($(subdir),elf)
+unchanged:
+--- a/sysdeps/aarch64/bits/link.h
++++ b/sysdeps/aarch64/bits/link.h
+@@ -20,23 +20,29 @@
+ # error "Never include <bits/link.h> directly; use <link.h> instead."
+ #endif
+ 
++typedef union
++{
++  float s;
++  double d;
++  long double q;
++} La_aarch64_vector;
++
+ /* Registers for entry into PLT on AArch64.  */
+ typedef struct La_aarch64_regs
+ {
+-  uint64_t lr_xreg[8];
+-  uint64_t lr_dreg[8];
+-  uint64_t lr_sp;
+-  uint64_t lr_lr;
++  uint64_t          lr_xreg[9];
++  La_aarch64_vector lr_vreg[8];
++  uint64_t          lr_sp;
++  uint64_t          lr_lr;
+ } La_aarch64_regs;
+ 
+ /* Return values for calls from PLT on AArch64.  */
+ typedef struct La_aarch64_retval
+ {
+-  /* Up to two integer registers can be used for a return value.  */
+-  uint64_t lrv_xreg[2];
+-  /* Up to four D registers can be used for a return value.  */
+-  uint64_t lrv_dreg[4];
+-
++  /* Up to eight integer registers can be used for a return value.  */
++  uint64_t          lrv_xreg[8];
++  /* Up to eight V registers can be used for a return value.  */
++  La_aarch64_vector lrv_vreg[8];
+ } La_aarch64_retval;
+ __BEGIN_DECLS
+ 
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/bits/link_lavcurrent.h
+@@ -0,0 +1,25 @@
++/* Data structure for communication from the run-time dynamic linker for
++   loaded ELF shared objects.  LAV_CURRENT definition.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#ifndef _LINK_H
++# error "Never include <bits/link_lavcurrent.h> directly; use <link.h> instead."
++#endif
++
++/* Version numbers for la_version handshake interface.  */
++#define LAV_CURRENT	2
+unchanged:
+--- a/sysdeps/aarch64/dl-link.sym
++++ b/sysdeps/aarch64/dl-link.sym
+@@ -7,9 +7,9 @@ DL_SIZEOF_RG		sizeof(struct La_aarch64_regs)
+ DL_SIZEOF_RV		sizeof(struct La_aarch64_retval)
+ 
+ DL_OFFSET_RG_X0		offsetof(struct La_aarch64_regs, lr_xreg)
+-DL_OFFSET_RG_D0		offsetof(struct La_aarch64_regs, lr_dreg)
++DL_OFFSET_RG_V0		offsetof(struct La_aarch64_regs, lr_vreg)
+ DL_OFFSET_RG_SP		offsetof(struct La_aarch64_regs, lr_sp)
+ DL_OFFSET_RG_LR		offsetof(struct La_aarch64_regs, lr_lr)
+ 
+ DL_OFFSET_RV_X0		offsetof(struct La_aarch64_retval, lrv_xreg)
+-DL_OFFSET_RV_D0		offsetof(struct La_aarch64_retval, lrv_dreg)
++DL_OFFSET_RV_V0		offsetof(struct La_aarch64_retval, lrv_vreg)
+unchanged:
+--- a/sysdeps/aarch64/dl-trampoline.S
++++ b/sysdeps/aarch64/dl-trampoline.S
+@@ -45,7 +45,8 @@ _dl_runtime_resolve:
+ 
+ 	cfi_rel_offset (lr, 8)
+ 
+-	/* Save arguments.  */
++	/* Note: Saving x9 is not required by the ABI but the assember requires
++	   the immediate values of operand 3 to be a multiple of 16 */
+ 	stp	x8, x9, [sp, #-(80+8*16)]!
+ 	cfi_adjust_cfa_offset (80+8*16)
+ 	cfi_rel_offset (x8, 0)
+@@ -142,13 +143,14 @@ _dl_runtime_profile:
+ 	   Stack frame layout:
+ 	   [sp,   #...] lr
+ 	   [sp,   #...] &PLTGOT[n]
+-	   [sp,    #96] La_aarch64_regs
+-	   [sp,    #48] La_aarch64_retval
+-	   [sp,    #40] frame size return from pltenter
+-	   [sp,    #32] dl_profile_call saved x1
+-	   [sp,    #24] dl_profile_call saved x0
+-	   [sp,    #16] t1
+-	   [sp,     #0] x29, lr   <- x29
++	   alignment padding 8 bytes
++	   La_aarch64_regs
++	   La_aarch64_retval
++	   frame size return from pltenter
++	   dl_profile_call saved x1
++	   dl_profile_call saved x0
++	   t1
++	   x29, lr   <- x29
+ 	 */
+ 
+ # define OFFSET_T1		16
+@@ -183,19 +185,22 @@ _dl_runtime_profile:
+ 	stp	x6, x7, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*3]
+ 	cfi_rel_offset (x6, OFFSET_RG + DL_OFFSET_RG_X0 + 16*3 + 0)
+ 	cfi_rel_offset (x7, OFFSET_RG + DL_OFFSET_RG_X0 + 16*3 + 8)
+-
+-	stp	d0, d1, [X29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*0]
+-	cfi_rel_offset (d0, OFFSET_RG + DL_OFFSET_RG_D0 + 16*0)
+-	cfi_rel_offset (d1, OFFSET_RG + DL_OFFSET_RG_D0 + 16*0 + 8)
+-	stp	d2, d3, [X29, #OFFSET_RG+ DL_OFFSET_RG_D0 + 16*1]
+-	cfi_rel_offset (d2, OFFSET_RG + DL_OFFSET_RG_D0 + 16*1 + 0)
+-	cfi_rel_offset (d3, OFFSET_RG + DL_OFFSET_RG_D0 + 16*1 + 8)
+-	stp	d4, d5, [X29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*2]
+-	cfi_rel_offset (d4, OFFSET_RG + DL_OFFSET_RG_D0 + 16*2 + 0)
+-	cfi_rel_offset (d5, OFFSET_RG + DL_OFFSET_RG_D0 + 16*2 + 8)
+-	stp	d6, d7, [X29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*3]
+-	cfi_rel_offset (d6, OFFSET_RG + DL_OFFSET_RG_D0 + 16*3 + 0)
+-	cfi_rel_offset (d7, OFFSET_RG + DL_OFFSET_RG_D0 + 16*3 + 8)
++	str	x8, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*4 + 0]
++	cfi_rel_offset (x8, OFFSET_RG + DL_OFFSET_RG_X0 + 16*4 + 0)
++	/* Note 8 bytes of padding is in the stack frame for alignment */
++
++	stp	q0, q1, [X29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*0]
++	cfi_rel_offset (q0, OFFSET_RG + DL_OFFSET_RG_V0 + 32*0)
++	cfi_rel_offset (q1, OFFSET_RG + DL_OFFSET_RG_V0 + 32*0 + 16)
++	stp	q2, q3, [X29, #OFFSET_RG+ DL_OFFSET_RG_V0 + 32*1]
++	cfi_rel_offset (q2, OFFSET_RG + DL_OFFSET_RG_V0 + 32*1 + 0)
++	cfi_rel_offset (q3, OFFSET_RG + DL_OFFSET_RG_V0 + 32*1 + 16)
++	stp	q4, q5, [X29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*2]
++	cfi_rel_offset (q4, OFFSET_RG + DL_OFFSET_RG_V0 + 32*2 + 0)
++	cfi_rel_offset (q5, OFFSET_RG + DL_OFFSET_RG_V0 + 32*2 + 16)
++	stp	q6, q7, [X29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*3]
++	cfi_rel_offset (q6, OFFSET_RG + DL_OFFSET_RG_V0 + 32*3 + 0)
++	cfi_rel_offset (q7, OFFSET_RG + DL_OFFSET_RG_V0 + 32*3 + 16)
+ 
+ 	add     x0, x29, #SF_SIZE + 16
+ 	ldr	x1, [x29, #OFFSET_LR]
+@@ -234,10 +239,11 @@ _dl_runtime_profile:
+ 	ldp	x2, x3, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*1]
+ 	ldp	x4, x5, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*2]
+ 	ldp	x6, x7, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*3]
+-	ldp	d0, d1, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*0]
+-	ldp	d2, d3, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*1]
+-	ldp	d4, d5, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*2]
+-	ldp	d6, d7, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*3]
++	ldr	x8,     [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*4]
++	ldp	q0, q1, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*0]
++	ldp	q2, q3, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*1]
++	ldp	q4, q5, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*2]
++	ldp	q6, q7, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*3]
+ 
+ 	cfi_def_cfa_register (sp)
+ 	ldp	x29, x30, [x29, #0]
+@@ -280,14 +286,21 @@ _dl_runtime_profile:
+ 	ldp	x2, x3, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*1]
+ 	ldp	x4, x5, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*2]
+ 	ldp	x6, x7, [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*3]
+-	ldp	d0, d1, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*0]
+-	ldp	d2, d3, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*1]
+-	ldp	d4, d5, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*2]
+-	ldp	d6, d7, [x29, #OFFSET_RG + DL_OFFSET_RG_D0 + 16*3]
++	ldr	x8,     [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*4]
++	ldp	q0, q1, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*0]
++	ldp	q2, q3, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*1]
++	ldp	q4, q5, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*2]
++	ldp	q6, q7, [x29, #OFFSET_RG + DL_OFFSET_RG_V0 + 32*3]
+ 	blr	ip0
+-	stp	x0, x1, [x29, #OFFSET_RV + DL_OFFSET_RV_X0]
+-	stp	d0, d1, [x29, #OFFSET_RV + DL_OFFSET_RV_D0 + 16*0]
+-	stp	d2, d3, [x29, #OFFSET_RV + DL_OFFSET_RV_D0 + 16*1]
++	stp	x0, x1, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*0]
++	stp	x2, x3, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*1]
++	stp	x4, x5, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*2]
++	stp	x6, x7, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*3]
++	str	x8,     [x29, #OFFSET_RG + DL_OFFSET_RG_X0 + 16*4]
++	stp	q0, q1, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*0]
++	stp	q2, q3, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*1]
++	stp	q4, q5, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*2]
++	stp	q6, q7, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*3]
+ 
+ 	/* Setup call to pltexit  */
+ 	ldp	x0, x1, [x29, #OFFSET_SAVED_CALL_X0]
+@@ -295,9 +308,16 @@ _dl_runtime_profile:
+ 	add	x3, x29, #OFFSET_RV
+ 	bl	_dl_audit_pltexit
+ 
+-	ldp	x0, x1, [x29, #OFFSET_RV + DL_OFFSET_RV_X0]
+-	ldp	d0, d1, [x29, #OFFSET_RV + DL_OFFSET_RV_D0 + 16*0]
+-	ldp	d2, d3, [x29, #OFFSET_RV + DL_OFFSET_RV_D0 + 16*1]
++	ldp	x0, x1, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*0]
++	ldp	x2, x3, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*1]
++	ldp	x4, x5, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*2]
++	ldp	x6, x7, [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*3]
++	ldr	x8,     [x29, #OFFSET_RV + DL_OFFSET_RV_X0 + 16*4]
++	ldp	q0, q1, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*0]
++	ldp	q2, q3, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*1]
++	ldp	q4, q5, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*2]
++	ldp	q6, q7, [x29, #OFFSET_RV + DL_OFFSET_RV_V0 + 32*3]
++
+ 	/* LR from within La_aarch64_reg */
+ 	ldr	lr, [x29, #OFFSET_RG + DL_OFFSET_RG_LR]
+ 	cfi_restore(lr)
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-audit26.c
+@@ -0,0 +1,37 @@
++/* Check DT_AUDIT for aarch64 ABI specifics.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <array_length.h>
++#include <string.h>
++#include <support/check.h>
++#include "tst-audit26mod.h"
++
++int
++do_test (void)
++{
++  /* Returning a large struct uses 'x8' as indirect result location.  */
++  struct large_struct r = tst_audit26_func (ARG1, ARG2, ARG3);
++
++  struct large_struct e = set_large_struct (ARG1, ARG2, ARG3);
++
++  TEST_COMPARE_BLOB (r.a, sizeof (r.a), e.a, sizeof (e.a));
++
++  return 0;
++}
++
++#include <support/test-driver.c>
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-audit26mod.c
+@@ -0,0 +1,33 @@
++/* Check DT_AUDIT for aarch64 ABI specifics.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <stdlib.h>
++#include "tst-audit26mod.h"
++
++struct large_struct
++tst_audit26_func (char a, short b, long int c)
++{
++  if (a != ARG1)
++    abort ();
++  if (b != ARG2)
++    abort ();
++  if (c != ARG3)
++    abort ();
++
++  return set_large_struct (a, b, c);
++}
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-audit26mod.h
+@@ -0,0 +1,50 @@
++/* Check DT_AUDIT for aarch64 specific ABI.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#ifndef _TST_AUDIT27MOD_H
++#define _TST_AUDIT27MOD_H 1
++
++#include <array_length.h>
++
++struct large_struct
++{
++  char a[16];
++  short b[8];
++  long int c[4];
++};
++
++static inline struct large_struct
++set_large_struct (char a, short b, long int c)
++{
++  struct large_struct r;
++  for (int i = 0; i < array_length (r.a); i++)
++    r.a[i] = a;
++  for (int i = 0; i < array_length (r.b); i++)
++    r.b[i] = b;
++  for (int i = 0; i < array_length (r.c); i++)
++    r.c[i] = c;
++  return r;
++}
++
++#define ARG1 0x12
++#define ARG2 0x1234
++#define ARG3 0x12345678
++
++struct large_struct tst_audit26_func (char a, short b, long int c);
++
++#endif
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-audit27.c
+@@ -0,0 +1,64 @@
++/* Check DT_AUDIT for aarch64 ABI specifics.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <array_length.h>
++#include <string.h>
++#include <support/check.h>
++#include "tst-audit27mod.h"
++
++int
++do_test (void)
++{
++  {
++    float r = tst_audit27_func_float (FUNC_FLOAT_ARG0, FUNC_FLOAT_ARG1,
++				      FUNC_FLOAT_ARG2, FUNC_FLOAT_ARG3,
++				      FUNC_FLOAT_ARG4, FUNC_FLOAT_ARG5,
++				      FUNC_FLOAT_ARG6, FUNC_FLOAT_ARG7);
++    if (r != FUNC_FLOAT_RET)
++      FAIL_EXIT1 ("tst_audit27_func_float() returned %a, expected %a",
++		  r, FUNC_FLOAT_RET);
++  }
++
++  {
++    double r = tst_audit27_func_double (FUNC_DOUBLE_ARG0, FUNC_DOUBLE_ARG1,
++					FUNC_DOUBLE_ARG2, FUNC_DOUBLE_ARG3,
++					FUNC_DOUBLE_ARG4, FUNC_DOUBLE_ARG5,
++					FUNC_DOUBLE_ARG6, FUNC_DOUBLE_ARG7);
++    if (r != FUNC_DOUBLE_RET)
++      FAIL_EXIT1 ("tst_audit27_func_double() returned %la, expected %la",
++		  r, FUNC_DOUBLE_RET);
++  }
++
++  {
++    long double r = tst_audit27_func_ldouble (FUNC_LDOUBLE_ARG0,
++					      FUNC_LDOUBLE_ARG1,
++					      FUNC_LDOUBLE_ARG2,
++					      FUNC_LDOUBLE_ARG3,
++					      FUNC_LDOUBLE_ARG4,
++					      FUNC_LDOUBLE_ARG5,
++					      FUNC_LDOUBLE_ARG6,
++					      FUNC_LDOUBLE_ARG7);
++    if (r != FUNC_LDOUBLE_RET)
++      FAIL_EXIT1 ("tst_audit27_func_ldouble() returned %La, expected %La",
++		  r, FUNC_LDOUBLE_RET);
++  }
++
++  return 0;
++}
++
++#include <support/test-driver.c>
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-audit27mod.c
+@@ -0,0 +1,95 @@
++/* Check DT_AUDIT for aarch64 ABI specifics.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <array_length.h>
++#include <stdlib.h>
++#include <support/check.h>
++#include "tst-audit27mod.h"
++
++float
++tst_audit27_func_float (float a0, float a1, float a2, float a3, float a4,
++		       	float a5, float a6, float a7)
++{
++  if (a0 != FUNC_FLOAT_ARG0)
++    FAIL_EXIT1 ("a0: %a != %a", a0, FUNC_FLOAT_ARG0);
++  if (a1 != FUNC_FLOAT_ARG1)
++    FAIL_EXIT1 ("a1: %a != %a", a1, FUNC_FLOAT_ARG1);
++  if (a2 != FUNC_FLOAT_ARG2)
++    FAIL_EXIT1 ("a2: %a != %a", a2, FUNC_FLOAT_ARG2);
++  if (a3 != FUNC_FLOAT_ARG3)
++    FAIL_EXIT1 ("a3: %a != %a", a3, FUNC_FLOAT_ARG3);
++  if (a4 != FUNC_FLOAT_ARG4)
++    FAIL_EXIT1 ("a4: %a != %a", a4, FUNC_FLOAT_ARG4);
++  if (a5 != FUNC_FLOAT_ARG5)
++    FAIL_EXIT1 ("a5: %a != %a", a5, FUNC_FLOAT_ARG5);
++  if (a6 != FUNC_FLOAT_ARG6)
++    FAIL_EXIT1 ("a6: %a != %a", a6, FUNC_FLOAT_ARG6);
++  if (a7 != FUNC_FLOAT_ARG7)
++    FAIL_EXIT1 ("a7: %a != %a", a7, FUNC_FLOAT_ARG7);
++
++  return FUNC_FLOAT_RET;
++}
++
++double
++tst_audit27_func_double (double a0, double a1, double a2, double a3, double a4,
++			 double a5, double a6, double a7)
++{
++  if (a0 != FUNC_DOUBLE_ARG0)
++    FAIL_EXIT1 ("a0: %la != %la", a0, FUNC_DOUBLE_ARG0);
++  if (a1 != FUNC_DOUBLE_ARG1)
++    FAIL_EXIT1 ("a1: %la != %la", a1, FUNC_DOUBLE_ARG1);
++  if (a2 != FUNC_DOUBLE_ARG2)
++    FAIL_EXIT1 ("a2: %la != %la", a2, FUNC_DOUBLE_ARG2);
++  if (a3 != FUNC_DOUBLE_ARG3)
++    FAIL_EXIT1 ("a3: %la != %la", a3, FUNC_DOUBLE_ARG3);
++  if (a4 != FUNC_DOUBLE_ARG4)
++    FAIL_EXIT1 ("a4: %la != %la", a4, FUNC_DOUBLE_ARG4);
++  if (a5 != FUNC_DOUBLE_ARG5)
++    FAIL_EXIT1 ("a5: %la != %la", a5, FUNC_DOUBLE_ARG5);
++  if (a6 != FUNC_DOUBLE_ARG6)
++    FAIL_EXIT1 ("a6: %la != %la", a6, FUNC_DOUBLE_ARG6);
++  if (a7 != FUNC_DOUBLE_ARG7)
++    FAIL_EXIT1 ("a7: %la != %la", a7, FUNC_DOUBLE_ARG7);
++
++  return FUNC_DOUBLE_RET;
++}
++
++long double
++tst_audit27_func_ldouble (long double a0, long double a1, long double a2,
++			  long double a3, long double a4, long double a5,
++			  long double a6, long double a7)
++{
++  if (a0 != FUNC_LDOUBLE_ARG0)
++    FAIL_EXIT1 ("a0: %La != %La", a0, FUNC_LDOUBLE_ARG0);
++  if (a1 != FUNC_LDOUBLE_ARG1)
++    FAIL_EXIT1 ("a1: %La != %La", a1, FUNC_LDOUBLE_ARG1);
++  if (a2 != FUNC_LDOUBLE_ARG2)
++    FAIL_EXIT1 ("a2: %La != %La", a2, FUNC_LDOUBLE_ARG2);
++  if (a3 != FUNC_LDOUBLE_ARG3)
++    FAIL_EXIT1 ("a3: %La != %La", a3, FUNC_LDOUBLE_ARG3);
++  if (a4 != FUNC_LDOUBLE_ARG4)
++    FAIL_EXIT1 ("a4: %La != %La", a4, FUNC_LDOUBLE_ARG4);
++  if (a5 != FUNC_LDOUBLE_ARG5)
++    FAIL_EXIT1 ("a5: %La != %La", a5, FUNC_LDOUBLE_ARG5);
++  if (a6 != FUNC_LDOUBLE_ARG6)
++    FAIL_EXIT1 ("a6: %La != %La", a6, FUNC_LDOUBLE_ARG6);
++  if (a7 != FUNC_LDOUBLE_ARG7)
++    FAIL_EXIT1 ("a7: %La != %La", a7, FUNC_LDOUBLE_ARG7);
++
++  return FUNC_LDOUBLE_RET;
++}
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-audit27mod.h
+@@ -0,0 +1,67 @@
++/* Check DT_AUDIT for aarch64 specific ABI.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#ifndef _TST_AUDIT27MOD_H
++#define _TST_AUDIT27MOD_H 1
++
++#include <float.h>
++
++#define FUNC_FLOAT_ARG0 FLT_MIN
++#define FUNC_FLOAT_ARG1 FLT_MAX
++#define FUNC_FLOAT_ARG2 FLT_EPSILON
++#define FUNC_FLOAT_ARG3 FLT_TRUE_MIN
++#define FUNC_FLOAT_ARG4 0.0f
++#define FUNC_FLOAT_ARG5 1.0f
++#define FUNC_FLOAT_ARG6 2.0f
++#define FUNC_FLOAT_ARG7 3.0f
++#define FUNC_FLOAT_RET  4.0f
++
++float
++tst_audit27_func_float (float a0, float a1, float a2, float a3, float a4,
++		       	float a5, float a6, float a7);
++
++#define FUNC_DOUBLE_ARG0 DBL_MIN
++#define FUNC_DOUBLE_ARG1 DBL_MAX
++#define FUNC_DOUBLE_ARG2 DBL_EPSILON
++#define FUNC_DOUBLE_ARG3 DBL_TRUE_MIN
++#define FUNC_DOUBLE_ARG4 0.0
++#define FUNC_DOUBLE_ARG5 1.0
++#define FUNC_DOUBLE_ARG6 2.0
++#define FUNC_DOUBLE_ARG7 3.0
++#define FUNC_DOUBLE_RET  0x1.fffffe0000001p+127
++
++double
++tst_audit27_func_double (double a0, double a1, double a2, double a3, double a4,
++			 double a5, double a6, double a7);
++
++#define FUNC_LDOUBLE_ARG0 DBL_MAX + 1.0L
++#define FUNC_LDOUBLE_ARG1 DBL_MAX + 2.0L
++#define FUNC_LDOUBLE_ARG2 DBL_MAX + 3.0L
++#define FUNC_LDOUBLE_ARG3 DBL_MAX + 4.0L
++#define FUNC_LDOUBLE_ARG4 DBL_MAX + 5.0L
++#define FUNC_LDOUBLE_ARG5 DBL_MAX + 6.0L
++#define FUNC_LDOUBLE_ARG6 DBL_MAX + 7.0L
++#define FUNC_LDOUBLE_ARG7 DBL_MAX + 8.0L
++#define FUNC_LDOUBLE_RET  0x1.fffffffffffff000000000000001p+1023L
++
++long double
++tst_audit27_func_ldouble (long double a0, long double a1, long double a2,
++			  long double a3, long double a4, long double a5,
++			  long double a6, long double a7);
++
++#endif
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-auditmod26.c
+@@ -0,0 +1,93 @@
++/* Check DT_AUDIT for aarch64 specific ABI.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <assert.h>
++#include <link.h>
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include "tst-audit26mod.h"
++
++#define TEST_NAME  "tst-audit26"
++
++#define AUDIT26_COOKIE 0
++
++unsigned int
++la_version (unsigned int v)
++{
++  return v;
++}
++
++unsigned int
++la_objopen (struct link_map *map, Lmid_t lmid, uintptr_t *cookie)
++{
++  const char *p = strrchr (map->l_name, '/');
++  const char *l_name = p == NULL ? map->l_name : p + 1;
++  uintptr_t ck = -1;
++  if (strncmp (l_name, TEST_NAME, strlen (TEST_NAME)) == 0)
++    ck = AUDIT26_COOKIE;
++  *cookie = ck;
++  printf ("objopen: %ld, %s\n", lmid, l_name);
++  return ck == -1 ? 0 : LA_FLG_BINDFROM | LA_FLG_BINDTO;
++}
++
++ElfW(Addr)
++la_aarch64_gnu_pltenter (ElfW(Sym) *sym __attribute__ ((unused)),
++                         unsigned int ndx __attribute__ ((unused)),
++                         uintptr_t *refcook, uintptr_t *defcook,
++                         La_aarch64_regs *regs, unsigned int *flags,
++                         const char *symname, long int *framesizep)
++{
++  printf ("pltenter: symname=%s, st_value=%#lx, ndx=%u, flags=%u\n",
++	  symname, (long int) sym->st_value, ndx, *flags);
++
++  if (strcmp (symname, "tst_audit26_func") == 0)
 +    {
-+      struct audit_ifaces *afct = GLRO(dl_audit);
-+      for (unsigned int cnt = 0; cnt < GLRO(dl_naudit); ++cnt)
-+	{
-+	  /* Profiling is needed only if PLT hooks are provided.  */
-+	  if (afct->ARCH_LA_PLTENTER != NULL || afct->ARCH_LA_PLTEXIT != NULL)
-+	    consider_profiling = 1;
-+	  afct = afct->next;
-+	}
++      assert (regs->lr_xreg[0] == ARG1);
++      assert (regs->lr_xreg[1] == ARG2);
++      assert (regs->lr_xreg[2] == ARG3);
 +    }
- #elif defined PROF
-   /* Never use dynamic linker profiling for gprof profiling code.  */
- # define consider_profiling 0
--- 
-1.8.2.1
++  else
++    abort ();
++
++  /* Clobber 'x8'.  */
++  asm volatile ("mov x8, -1" : : : "x8");
++
++  return sym->st_value;
++}
++
++unsigned int
++la_aarch64_gnu_pltexit (ElfW(Sym) *sym, unsigned int ndx, uintptr_t *refcook,
++                        uintptr_t *defcook,
++                        const struct La_aarch64_regs *inregs,
++                        struct La_aarch64_retval *outregs, const char *symname)
++{
++  if (strcmp (symname, "tst_audit26_func") == 0)
++    {
++      assert (inregs->lr_xreg[0] == ARG1);
++      assert (inregs->lr_xreg[1] == ARG2);
++      assert (inregs->lr_xreg[2] == ARG3);
++    }
++  else
++    abort ();
++
++  /* Clobber 'x8'.  */
++  asm volatile ("mov x8, -1" : : : "x8");
++
++  return 0;
++}
+unchanged:
+--- /dev/null
++++ b/sysdeps/aarch64/tst-auditmod27.c
+@@ -0,0 +1,173 @@
++/* Check DT_AUDIT for aarch64 specific ABI.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <assert.h>
++#include <link.h>
++#include <string.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include "tst-audit27mod.h"
++
++#define TEST_NAME  "tst-audit27"
++
++#define AUDIT27_COOKIE 0
++
++unsigned int
++la_version (unsigned int v)
++{
++  return v;
++}
++
++unsigned int
++la_objopen (struct link_map *map, Lmid_t lmid, uintptr_t *cookie)
++{
++  const char *p = strrchr (map->l_name, '/');
++  const char *l_name = p == NULL ? map->l_name : p + 1;
++  uintptr_t ck = -1;
++  if (strncmp (l_name, TEST_NAME, strlen (TEST_NAME)) == 0)
++    ck = AUDIT27_COOKIE;
++  *cookie = ck;
++  printf ("objopen: %ld, %s\n", lmid, l_name);
++  return ck == -1 ? 0 : LA_FLG_BINDFROM | LA_FLG_BINDTO;
++}
++
++ElfW(Addr)
++la_aarch64_gnu_pltenter (ElfW(Sym) *sym, unsigned int ndx, uintptr_t *refcook,
++			 uintptr_t *defcook, La_aarch64_regs *regs,
++			 unsigned int *flags, const char *symname,
++			 long int *framesizep)
++{
++  printf ("pltenter: symname=%s, st_value=%#lx, ndx=%u, flags=%u\n",
++	  symname, (long int) sym->st_value, ndx, *flags);
++
++  if (strcmp (symname, "tst_audit27_func_float") == 0)
++    {
++      assert (regs->lr_vreg[0].s == FUNC_FLOAT_ARG0);
++      assert (regs->lr_vreg[1].s == FUNC_FLOAT_ARG1);
++      assert (regs->lr_vreg[2].s == FUNC_FLOAT_ARG2);
++      assert (regs->lr_vreg[3].s == FUNC_FLOAT_ARG3);
++      assert (regs->lr_vreg[4].s == FUNC_FLOAT_ARG4);
++      assert (regs->lr_vreg[5].s == FUNC_FLOAT_ARG5);
++      assert (regs->lr_vreg[6].s == FUNC_FLOAT_ARG6);
++      assert (regs->lr_vreg[7].s == FUNC_FLOAT_ARG7);
++    }
++  else if (strcmp (symname, "tst_audit27_func_double") == 0)
++    {
++      assert (regs->lr_vreg[0].d == FUNC_DOUBLE_ARG0);
++      assert (regs->lr_vreg[1].d == FUNC_DOUBLE_ARG1);
++      assert (regs->lr_vreg[2].d == FUNC_DOUBLE_ARG2);
++      assert (regs->lr_vreg[3].d == FUNC_DOUBLE_ARG3);
++      assert (regs->lr_vreg[4].d == FUNC_DOUBLE_ARG4);
++      assert (regs->lr_vreg[5].d == FUNC_DOUBLE_ARG5);
++      assert (regs->lr_vreg[6].d == FUNC_DOUBLE_ARG6);
++      assert (regs->lr_vreg[7].d == FUNC_DOUBLE_ARG7);
++    }
++  else if (strcmp (symname, "tst_audit27_func_ldouble") == 0)
++    {
++      assert (regs->lr_vreg[0].q == FUNC_LDOUBLE_ARG0);
++      assert (regs->lr_vreg[1].q == FUNC_LDOUBLE_ARG1);
++      assert (regs->lr_vreg[2].q == FUNC_LDOUBLE_ARG2);
++      assert (regs->lr_vreg[3].q == FUNC_LDOUBLE_ARG3);
++      assert (regs->lr_vreg[4].q == FUNC_LDOUBLE_ARG4);
++      assert (regs->lr_vreg[5].q == FUNC_LDOUBLE_ARG5);
++      assert (regs->lr_vreg[6].q == FUNC_LDOUBLE_ARG6);
++      assert (regs->lr_vreg[7].q == FUNC_LDOUBLE_ARG7);
++    }
++  else
++    abort ();
++
++  /* Clobber the q registers on exit.  */
++  uint8_t v = 0xff;
++  asm volatile ("dup v0.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v1.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v2.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v3.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v4.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v5.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v6.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v7.8b, %w0" : : "r" (v) : "v0");
++
++  return sym->st_value;
++}
++
++unsigned int
++la_aarch64_gnu_pltexit (ElfW(Sym) *sym, unsigned int ndx, uintptr_t *refcook,
++                        uintptr_t *defcook,
++			const struct La_aarch64_regs *inregs,
++                        struct La_aarch64_retval *outregs,
++		       	const char *symname)
++{
++  printf ("pltexit: symname=%s, st_value=%#lx, ndx=%u\n",
++	  symname, (long int) sym->st_value, ndx);
++
++  if (strcmp (symname, "tst_audit27_func_float") == 0)
++    {
++      assert (inregs->lr_vreg[0].s == FUNC_FLOAT_ARG0);
++      assert (inregs->lr_vreg[1].s == FUNC_FLOAT_ARG1);
++      assert (inregs->lr_vreg[2].s == FUNC_FLOAT_ARG2);
++      assert (inregs->lr_vreg[3].s == FUNC_FLOAT_ARG3);
++      assert (inregs->lr_vreg[4].s == FUNC_FLOAT_ARG4);
++      assert (inregs->lr_vreg[5].s == FUNC_FLOAT_ARG5);
++      assert (inregs->lr_vreg[6].s == FUNC_FLOAT_ARG6);
++      assert (inregs->lr_vreg[7].s == FUNC_FLOAT_ARG7);
++
++      assert (outregs->lrv_vreg[0].s == FUNC_FLOAT_RET);
++    }
++  else if (strcmp (symname, "tst_audit27_func_double") == 0)
++    {
++      assert (inregs->lr_vreg[0].d == FUNC_DOUBLE_ARG0);
++      assert (inregs->lr_vreg[1].d == FUNC_DOUBLE_ARG1);
++      assert (inregs->lr_vreg[2].d == FUNC_DOUBLE_ARG2);
++      assert (inregs->lr_vreg[3].d == FUNC_DOUBLE_ARG3);
++      assert (inregs->lr_vreg[4].d == FUNC_DOUBLE_ARG4);
++      assert (inregs->lr_vreg[5].d == FUNC_DOUBLE_ARG5);
++      assert (inregs->lr_vreg[6].d == FUNC_DOUBLE_ARG6);
++      assert (inregs->lr_vreg[7].d == FUNC_DOUBLE_ARG7);
++
++      assert (outregs->lrv_vreg[0].s == FUNC_DOUBLE_RET);
++    }
++  else if (strcmp (symname, "tst_audit27_func_ldouble") == 0)
++    {
++      assert (inregs->lr_vreg[0].q == FUNC_LDOUBLE_ARG0);
++      assert (inregs->lr_vreg[1].q == FUNC_LDOUBLE_ARG1);
++      assert (inregs->lr_vreg[2].q == FUNC_LDOUBLE_ARG2);
++      assert (inregs->lr_vreg[3].q == FUNC_LDOUBLE_ARG3);
++      assert (inregs->lr_vreg[4].q == FUNC_LDOUBLE_ARG4);
++      assert (inregs->lr_vreg[5].q == FUNC_LDOUBLE_ARG5);
++      assert (inregs->lr_vreg[6].q == FUNC_LDOUBLE_ARG6);
++      assert (inregs->lr_vreg[7].q == FUNC_LDOUBLE_ARG7);
++
++      assert (outregs->lrv_vreg[0].s == FUNC_LDOUBLE_RET);
++    }
++  else
++    abort ();
++
++  /* Clobber the q registers on exit.  */
++  uint8_t v = 0xff;
++  asm volatile ("dup v0.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v1.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v2.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v3.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v4.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v5.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v6.8b, %w0" : : "r" (v) : "v0");
++  asm volatile ("dup v7.8b, %w0" : : "r" (v) : "v0");
++
++  return 0;
++}
+only in patch2:
+unchanged:
+--- a/elf/Makefile
++++ b/elf/Makefile
+@@ -223,6 +223,7 @@ tests += restest1 preloadtest loadfail multiload origtest resolvfail \
+ 	 tst-audit18a tst-audit18b \
+ 	 tst-audit19 \
+ 	 tst-audit20 \
++	 tst-audit21 \
+ 	 tst-single_threaded tst-single_threaded-pthread \
+ 	 tst-tls-ie tst-tls-ie-dlmopen argv0test \
+ 	 tst-glibc-hwcaps tst-glibc-hwcaps-prepend tst-glibc-hwcaps-mask \
+@@ -307,6 +308,7 @@ modules-names = testobj1 testobj2 testobj3 testobj4 testobj5 testobj6 \
+ 		tst-auditmod18a tst-auditmod18b tst-audit18bmod \
+ 		tst-auditmod19 \
+ 		tst-auditmod20 tst-audit20mod \
++		tst-auditmod21 \
+ 		$(if $(CXX),tst-unique3lib tst-unique3lib2 tst-unique4lib \
+ 		  tst-nodelete-uniquemod tst-nodelete-rtldmod \
+ 		  tst-nodelete-zmod \
+@@ -1520,6 +1522,9 @@ $(objpfx)tst-audit20.out: $(objpfx)tst-auditmod20.so \
+ 			  $(objpfx)tst-audit20mod.so
+ tst-audit20-ARGS = -- $(host-test-program-cmd)
+ 
++$(objpfx)tst-audit21.out: $(objpfx)tst-auditmod21.so
++tst-audit21-ENV = LD_AUDIT=$(objpfx)tst-auditmod21.so
++
+ # tst-sonamemove links against an older implementation of the library.
+ LDFLAGS-tst-sonamemove-linkmod1.so = \
+   -Wl,--version-script=tst-sonamemove-linkmod1.map \
+only in patch2:
+unchanged:
+--- a/elf/dl-object.c
++++ b/elf/dl-object.c
+@@ -175,6 +175,9 @@ _dl_new_object (char *realname, const char *libname, int type,
+ 
+   new->l_local_scope[0] = &new->l_searchlist;
+ 
++  if (mode & __RTLD_AUDIT)
++    new->l_dont_set_tls_static = 1;
++
+   /* Determine the origin.  If allocating the link map for the main
+      executable, the realname is not known and "".  In this case, the
+      origin needs to be determined by other means.  However, in case
+only in patch2:
+unchanged:
+--- a/elf/dl-tls.c
++++ b/elf/dl-tls.c
+@@ -593,10 +593,18 @@ _dl_allocate_tls_init (void *result)
+ 	     some platforms use in static programs requires it.  */
+ 	  dtv[map->l_tls_modid].pointer.val = dest;
+ 
+-	  /* Copy the initialization image and clear the BSS part.  */
+-	  memset (__mempcpy (dest, map->l_tls_initimage,
+-			     map->l_tls_initimage_size), '\0',
+-		  map->l_tls_blocksize - map->l_tls_initimage_size);
++	  /* Copy the initialization image and clear the BSS part.  For
++	     ldaudit modules or depedencies with initial-exec TLS, we can not
++	     set the initial TLS image on default loader initialization
++	     because it would already be set by the ldaudit setup.  However,
++	     subsequent thread creation would need to follow the default
++	     behaviour.   */
++	  if (__glibc_unlikely (!map->l_dont_set_tls_static))
++	    memset (__mempcpy (dest, map->l_tls_initimage,
++			       map->l_tls_initimage_size), '\0',
++		    map->l_tls_blocksize - map->l_tls_initimage_size);
++	  else
++	    map->l_dont_set_tls_static = 0;
+ 	}
+ 
+       total += cnt;
+only in patch2:
+unchanged:
+--- /dev/null
++++ b/elf/tst-audit21.c
+@@ -0,0 +1,42 @@
++/* Check DT_AUDIT with static TLS.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <ctype.h>
++#include <support/xthread.h>
++#include <support/check.h>
++
++static volatile __thread int out __attribute__ ((tls_model ("initial-exec")));
++
++static void *
++tf (void *)
++{
++  TEST_COMPARE (out, 0);
++  out = isspace (' ');
++  return NULL;
++}
++
++int main (int argc, char *argv[])
++{
++  TEST_COMPARE (out, 0);
++  out = isspace (' ');
++
++  pthread_t t = xpthread_create (NULL, tf, NULL);
++  xpthread_join (t);
++
++  return 0;
++}
+only in patch2:
+unchanged:
+--- /dev/null
++++ b/elf/tst-auditmod21.c
+@@ -0,0 +1,69 @@
++/* Check DT_AUDIT with static TLS.
++   Copyright (C) 2021 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <ctype.h>
++#include <stdlib.h>
++#include <link.h>
++
++#define tls_ie __attribute__ ((tls_model ("initial-exec")))
++
++__thread int tls_var0 tls_ie;
++__thread int tls_var1 tls_ie = 0x10;
++
++static volatile int out;
++
++static void
++call_libc (void)
++{
++  /* isspace() access the initial-exec glibc TLS variables, which are
++     setup in glibc initialization.  */
++  out = isspace (' ');
++}
++
++unsigned int
++la_version (unsigned int v)
++{
++  tls_var0 = 0x1;
++  if (tls_var1 != 0x10)
++    abort ();
++  tls_var1 = 0x20;
++  call_libc ();
++  return LAV_CURRENT;
++}
++
++unsigned int
++la_objopen (struct link_map* map, Lmid_t lmid, uintptr_t* cookie)
++{
++  call_libc ();
++  *cookie = (uintptr_t) map;
++  return 0;
++}
++
++void
++la_activity (uintptr_t* cookie, unsigned int flag)
++{
++  if (tls_var0 != 0x1 || tls_var1 != 0x20)
++    abort ();
++  call_libc ();
++}
++
++void
++la_preinit (uintptr_t* cookie)
++{
++  call_libc ();
++}
+only in patch2:
+unchanged:
+--- a/include/link.h
++++ b/include/link.h
+@@ -190,6 +190,8 @@ struct link_map
+     unsigned int l_need_tls_init:1; /* Nonzero if GL(dl_init_static_tls)
+ 				       should be called on this link map
+ 				       when relocation finishes.  */
++    unsigned int l_dont_set_tls_static:1; /* Non zero if static TLS setup should
++					     not be initialized.  */
+     unsigned int l_auditing:1;	/* Nonzero if the DSO is used in auditing.  */
+     unsigned int l_audit_any_plt:1; /* Nonzero if at least one audit module
+ 				       is interested in the PLT interception.*/
